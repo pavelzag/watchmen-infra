@@ -211,7 +211,10 @@ resource "google_sql_database_instance" "test" {
     }
 
     ip_configuration {
-      ipv4_enabled = false
+      # ipv4_enabled = false requires a private IP (VPC peering) which isn't configured here.
+      # Public IP with no authorized_networks = reachable only via Cloud SQL Auth Proxy.
+      ipv4_enabled = true
+      require_ssl  = true
     }
   }
 }
