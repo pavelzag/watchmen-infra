@@ -124,6 +124,17 @@ resource "google_project_iam_member" "fix_cicd_sa_minimal" {
   depends_on = [google_project_iam_binding.fix_remove_editor]
 }
 
+# Grant wm-attack-escalation-sa only the minimum permissions it actually needs.
+# The editor role has been removed above via fix_remove_editor; bind only
+# a narrow role here. Adjust the role to whatever this SA genuinely requires.
+resource "google_project_iam_member" "fix_escalation_sa_minimal" {
+  project = "watchmen-test-488807"
+  role    = "roles/viewer"
+  member  = "serviceAccount:wm-attack-escalation-sa@watchmen-test-488807.iam.gserviceaccount.com"
+
+  depends_on = [google_project_iam_binding.fix_remove_editor]
+}
+
 # ── CLOUD RUN AUTHENTICATION FIXES ───────────────────────────────────────────
 # Require authentication on both public Cloud Run services.
 # Addresses: cloudrun-sa:wm-attack-public-api and cloudrun-sa:wm-attack-public-internal-api
@@ -197,6 +208,60 @@ provider "google" {
   region  = "us-central1"
 }
 
+# ── REMOVE VM EXTERNAL IPs ────────────────────────────────────────────────────
+# Remove the external/ephemeral IP from both attack-path VMs so they are no
+# longer directly reachable from the internet.  Access should be via Cloud IAP
+# or a bastion host on the internal network instead.
+#
+# NOTE: Changing access_config from an ephemeral public IP to no public IP
+# forces replacement of the network interface; plan carefully before applying.
+
+resource "google_compute_instance" "fix_gke_node_no_external_ip" {
+  name         = "gke-wm-test-cluster-wm-test-node-pool-5b7104c1-yiqg"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+  project      = "watchmen-test-488807"
+
+  boot_disk {
+    initialize_params {
+      image = "projects/cos-cloud/global/images/family/cos-stable"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    # No access_config block → no external IP assigned
+  }
+
+  service_account {
+    email  = "wm-test-cicd@watchmen-test-488807.iam.gserviceaccount.com"
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+}
+
+resource "google_compute_instance" "fix_wm_attack_privileged_vm_no_external_ip" {
+  name         = "wm-attack-privileged-vm"
+  machine_type = "e2-medium"
+  zone         = "us-central1-a"
+  project      = "watchmen-test-488807"
+
+  boot_disk {
+    initialize_params {
+      image = "projects/cos-cloud/global/images/family/cos-stable"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    # No access_config block → no external IP assigned
+  }
+
+  service_account {
+    email  = "wm-attack-escalation-sa@watchmen-test-488807.iam.gserviceaccount.com"
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+}
+
 # ============================================================================
 # NOT AUTOMATED: user-lateral:zagalsky@gmail.com
 #
@@ -210,4 +275,9 @@ provider "google" {
 #      scoped to specific resources in each project.
 #   3. Enable MFA and login alerts on zagalsky@gmail.com.
 #   4. Run: gcloud projects get-iam-policy <project> to audit each project.
+#
+# Projects affected:
+#   theinsite, bonvoyage-489606, gen-lang-client-0760991201,
+#   watchmen-test-488807, gen-lang-client-0605201272, bookondemand-711e9,
+#   api-8868282396434458803-11251, and 6 additional projects.
 # ============================================================================
