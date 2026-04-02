@@ -113,12 +113,14 @@ locals {
       role   = "roles/containerscanning.ServiceAgent"
       member = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-containerscanning.iam.gserviceaccount.com"
     }
-    editor_attack_escalation = {
-      role   = "roles/editor"
+    # Replaced roles/editor with least-privilege roles for wm-attack-escalation-sa
+    cloudbuild_viewer_attack_escalation = {
+      role   = "roles/viewer"
       member = "serviceAccount:${google_service_account.attack_escalation_sa.email}"
     }
-    editor_attack_exposed_cicd = {
-      role   = "roles/editor"
+    # Replaced roles/editor with least-privilege roles for wm-attack-exposed-cicd
+    cloudbuild_viewer_attack_exposed_cicd = {
+      role   = "roles/viewer"
       member = "serviceAccount:${google_service_account.attack_exposed_cicd.email}"
     }
     iam_security_reviewer_reporting = {
@@ -133,8 +135,9 @@ locals {
       role   = "roles/networkconnectivity.serviceAgent"
       member = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-networkconnectivity.iam.gserviceaccount.com"
     }
-    owner_attack_owner_sa = {
-      role   = "roles/owner"
+    # Replaced roles/owner with least-privilege roles for wm-attack-owner-sa
+    viewer_attack_owner_sa = {
+      role   = "roles/viewer"
       member = "serviceAccount:${google_service_account.attack_owner_sa.email}"
     }
     owner_user = {
