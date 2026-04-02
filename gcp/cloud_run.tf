@@ -40,6 +40,34 @@ resource "google_cloud_run_v2_service" "api" {
   }
 }
 
+resource "google_secret_manager_secret" "aws_access_key_id" {
+  secret_id = "aws-access-key-id"
+  project   = "watchmen-test-488807"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "aws_access_key_id" {
+  secret      = google_secret_manager_secret.aws_access_key_id.id
+  secret_data = "AKIAIOSFODNN7EXAMPLE"
+}
+
+resource "google_secret_manager_secret" "aws_secret_access_key" {
+  secret_id = "aws-secret-access-key"
+  project   = "watchmen-test-488807"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "aws_secret_access_key" {
+  secret      = google_secret_manager_secret.aws_secret_access_key.id
+  secret_data = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+}
+
 resource "google_cloud_run_v2_service" "attack_leaked_aws_creds" {
   name     = "wm-attack-leaked-aws-creds"
   location = var.region
@@ -49,13 +77,23 @@ resource "google_cloud_run_v2_service" "attack_leaked_aws_creds" {
       image = "us-docker.pkg.dev/cloudrun/container/hello"
 
       env {
-        name  = "AWS_ACCESS_KEY_ID"
-        value = "AKIAIOSFODNN7EXAMPLE"
+        name = "AWS_ACCESS_KEY_ID"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.aws_access_key_id.secret_id
+            version = "latest"
+          }
+        }
       }
 
       env {
-        name  = "AWS_SECRET_ACCESS_KEY"
-        value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        name = "AWS_SECRET_ACCESS_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.aws_secret_access_key.secret_id
+            version = "latest"
+          }
+        }
       }
 
       resources {
@@ -69,6 +107,20 @@ resource "google_cloud_run_v2_service" "attack_leaked_aws_creds" {
       max_instance_count = 1
     }
   }
+}
+
+resource "google_secret_manager_secret" "stripe_secret_key" {
+  secret_id = "stripe-secret-key"
+  project   = "watchmen-test-488807"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "stripe_secret_key" {
+  secret      = google_secret_manager_secret.stripe_secret_key.id
+  secret_data = "sk_WATCHMEN_DEMO_NOT_A_REAL_KEY_ABCDE99"
 }
 
 resource "google_cloud_run_v2_service" "attack_stripe_key" {
@@ -80,8 +132,13 @@ resource "google_cloud_run_v2_service" "attack_stripe_key" {
       image = "us-docker.pkg.dev/cloudrun/container/hello"
 
       env {
-        name  = "STRIPE_SECRET_KEY"
-        value = "sk_WATCHMEN_DEMO_NOT_A_REAL_KEY_ABCDE99"
+        name = "STRIPE_SECRET_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.stripe_secret_key.secret_id
+            version = "latest"
+          }
+        }
       }
 
       resources {
@@ -95,6 +152,20 @@ resource "google_cloud_run_v2_service" "attack_stripe_key" {
       max_instance_count = 1
     }
   }
+}
+
+resource "google_secret_manager_secret" "github_token" {
+  secret_id = "github-token"
+  project   = "watchmen-test-488807"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "github_token" {
+  secret      = google_secret_manager_secret.github_token.id
+  secret_data = "ghp_WatchmenDemoFakeTokenABCDEFGHIJKLMN01"
 }
 
 resource "google_cloud_run_v2_service" "attack_github_token" {
@@ -106,8 +177,13 @@ resource "google_cloud_run_v2_service" "attack_github_token" {
       image = "us-docker.pkg.dev/cloudrun/container/hello"
 
       env {
-        name  = "GITHUB_TOKEN"
-        value = "ghp_WatchmenDemoFakeTokenABCDEFGHIJKLMN01"
+        name = "GITHUB_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.github_token.secret_id
+            version = "latest"
+          }
+        }
       }
 
       resources {
@@ -123,6 +199,34 @@ resource "google_cloud_run_v2_service" "attack_github_token" {
   }
 }
 
+resource "google_secret_manager_secret" "database_password" {
+  secret_id = "database-password"
+  project   = "watchmen-test-488807"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "database_password" {
+  secret      = google_secret_manager_secret.database_password.id
+  secret_data = "WatchmenDemoDbPasswordSecretKey2024"
+}
+
+resource "google_secret_manager_secret" "database_url" {
+  secret_id = "database-url"
+  project   = "watchmen-test-488807"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "database_url" {
+  secret      = google_secret_manager_secret.database_url.id
+  secret_data = "postgresql://admin:WatchmenDemoDbPasswordSecretKey2024@10.0.0.5:5432/prod"
+}
+
 resource "google_cloud_run_v2_service" "attack_db_password_env" {
   name     = "wm-attack-db-password-env"
   location = var.region
@@ -132,13 +236,23 @@ resource "google_cloud_run_v2_service" "attack_db_password_env" {
       image = "us-docker.pkg.dev/cloudrun/container/hello"
 
       env {
-        name  = "DATABASE_PASSWORD"
-        value = "WatchmenDemoDbPasswordSecretKey2024"
+        name = "DATABASE_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.database_password.secret_id
+            version = "latest"
+          }
+        }
       }
 
       env {
-        name  = "DATABASE_URL"
-        value = "postgresql://admin:WatchmenDemoDbPasswordSecretKey2024@10.0.0.5:5432/prod"
+        name = "DATABASE_URL"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.database_url.secret_id
+            version = "latest"
+          }
+        }
       }
 
       resources {
