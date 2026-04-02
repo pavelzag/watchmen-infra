@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Destroys the active GCP Terraform snapshot.
+# Destroys all Watchmen GCP test assets created by apply.sh.
+# Usage: bash scripts/terraform/gcp/destroy.sh [--project=<id>]
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -12,8 +13,8 @@ for arg in "$@"; do
   esac
 done
 
-echo "→ Destroying active GCP snapshot resources..."
+echo "→ Destroying all GCP test assets (this is irreversible)..."
 # shellcheck disable=SC2086
 terraform destroy -auto-approve $PROJECT_VAR
 
-echo "✓ Destroy finished."
+echo "✓ All GCP test assets removed."

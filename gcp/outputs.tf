@@ -1,9 +1,19 @@
+output "project_id" {
+  value = var.project_id
+}
+
 output "service_accounts" {
-  value = {
-    etl       = google_service_account.etl.email
-    reporting = google_service_account.reporting.email
-    cicd      = google_service_account.cicd.email
-  }
+  value = [
+    google_service_account.etl.email,
+    google_service_account.reporting.email,
+    google_service_account.cicd.email,
+    google_service_account.attack_escalation_sa.email,
+    google_service_account.attack_owner_sa.email,
+    google_service_account.attack_multikey_sa.email,
+    google_service_account.attack_exposed_cicd.email,
+    google_service_account.github_ci.email,
+    google_service_account.watchmen_reader.email,
+  ]
 }
 
 output "buckets" {
@@ -11,46 +21,39 @@ output "buckets" {
     google_storage_bucket.logs.name,
     google_storage_bucket.data.name,
     google_storage_bucket.backups.name,
+    google_storage_bucket.attack_public_data.name,
+    google_storage_bucket.attack_public_uploads.name,
+    google_storage_bucket.cloudbuild.name,
   ]
 }
 
-output "gke_cluster" {
-  value = google_container_cluster.test.name
-  # cluster exists (control plane only, no nodes — sufficient for Watchmen to list it)
-}
-
-output "vm" {
-  value = google_compute_instance.test.name
-}
-
-output "cloud_run_urls" {
-  value = {
-    hello = google_cloud_run_v2_service.hello.uri
-    api   = google_cloud_run_v2_service.api.uri
-  }
-}
-
-output "sql_instance" {
-  value = google_sql_database_instance.test.name
-}
-
-output "bigquery_datasets" {
+output "cloud_run_services" {
   value = [
-    google_bigquery_dataset.analytics.dataset_id,
-    google_bigquery_dataset.logs.dataset_id,
-    google_bigquery_dataset.ml_features.dataset_id,
+    google_cloud_run_v2_service.hello.name,
+    google_cloud_run_v2_service.api.name,
+    google_cloud_run_v2_service.attack_leaked_aws_creds.name,
+    google_cloud_run_v2_service.attack_stripe_key.name,
+    google_cloud_run_v2_service.attack_github_token.name,
+    google_cloud_run_v2_service.attack_db_password_env.name,
+    google_cloud_run_v2_service.attack_public_internal_api.name,
+    google_cloud_run_v2_service.attack_public_api.name,
+  ]
+}
+
+output "compute_instances" {
+  value = [
+    google_compute_instance.test.name,
+    google_compute_instance.attack_privileged_vm.name,
+    google_compute_instance.attack_exposed_vm.name,
+    google_compute_instance.attack_dev_instance.name,
   ]
 }
 
 output "pubsub_topics" {
-  value = [
-    google_pubsub_topic.events.name,
-    google_pubsub_topic.alerts.name,
-    google_pubsub_topic.metrics.name,
-  ]
+  value = sort([for topic in google_pubsub_topic.topics : topic.name])
 }
 
-output "secrets" {
+output "secret_names" {
   value = [
     google_secret_manager_secret.api_key.secret_id,
     google_secret_manager_secret.db_password.secret_id,

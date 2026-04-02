@@ -1,9 +1,16 @@
 provider "aws" {
-  region = var.aws_region
+  region  = var.aws_region
+  profile = var.aws_profile
 }
 
 variable "aws_region" {
   default = "us-east-1"
+}
+
+variable "aws_profile" {
+  description = "Optional shared AWS config/credentials profile name"
+  type        = string
+  default     = null
 }
 
 # ── Networking (Minimal VPC to avoid "No default VPC" errors) ──────────────
@@ -132,8 +139,8 @@ resource "aws_iam_role" "lambda_exec" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
