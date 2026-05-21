@@ -26,4 +26,6 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
+# Backup snapshots and generated lockfiles inside backups
+backup/**/.terraform.lock.hcl
 
