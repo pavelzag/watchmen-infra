@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: watchmen-trace-main
+  namespace: watchmen
+  labels:
+    app: watchmen-trace-main
+    app.kubernetes.io/name: watchmen-trace-main
+    app.kubernetes.io/part-of: watchmen
+  annotations:
+    watchmen.io/role: trace-test
+spec:
+  type: LoadBalancer
+  selector:
+    app: watchmen-trace-main
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: watchmen-trace-worker-a
+  namespace: watchmen
+  labels:
+    app: watchmen-trace-worker-a
+    app.kubernetes.io/name: watchmen-trace-worker-a
+    app.kubernetes.io/part-of: watchmen
+  annotations:
+    watchmen.io/role: trace-test
+spec:
+  type: ClusterIP
+  selector:
+    app: watchmen-trace-worker-a
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: watchmen-trace-worker-b
+  namespace: watchmen
+  labels:
+    app: watchmen-trace-worker-b
+    app.kubernetes.io/name: watchmen-trace-worker-b
+    app.kubernetes.io/part-of: watchmen
+  annotations:
+    watchmen.io/role: trace-test
+spec:
+  type: ClusterIP
+  selector:
+    app: watchmen-trace-worker-b
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
