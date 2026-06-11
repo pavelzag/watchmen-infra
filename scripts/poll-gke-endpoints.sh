@@ -369,7 +369,6 @@ if [[ -n "$trace_url" ]]; then
     ""
     ""
     ""
-    ""
     "$json_payload"
     "$form_payload"
     "$text_payload"
