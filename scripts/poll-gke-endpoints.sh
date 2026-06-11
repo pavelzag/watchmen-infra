@@ -382,7 +382,6 @@ if [[ -n "$trace_url" ]]; then
     ""
     ""
     ""
-    ""
     "application/json"
     "application/x-www-form-urlencoded"
     "text/plain; charset=utf-8"
