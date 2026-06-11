@@ -112,6 +112,13 @@ if [[ -z "$cluster" && -d "$tf_dir" ]]; then
   cluster="$(terraform -chdir="$tf_dir" output -raw cluster_name 2>/dev/null || true)"
 fi
 
+if [[ -z "$trace_url" ]]; then
+  live_trace_ip="$(kubectl -n "${NAMESPACE:-watchmen}" get svc watchmen-trace-main -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+  if [[ -n "$live_trace_ip" ]]; then
+    trace_url="http://${live_trace_ip}/"
+  fi
+fi
+
 if [[ -z "$trace_url" && -d "$tf_dir" ]]; then
   trace_url="$(terraform -chdir="$tf_dir" output -raw trace_test_url 2>/dev/null || true)"
 fi
