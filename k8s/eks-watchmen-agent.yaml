@@ -1,0 +1,571 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${WATCHMEN_NAMESPACE}
+  labels:
+    name: ${WATCHMEN_NAMESPACE}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: watchmen-agent-secret
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: watchmen
+    app.kubernetes.io/component: ebpf-agent
+type: Opaque
+stringData:
+  agent_secret: ${WATCHMEN_AGENT_SECRET}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watchmen-trace-go-app
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: watchmen-trace-go-app
+    app.kubernetes.io/part-of: watchmen
+data:
+  main.go: |
+    package main
+
+    import (
+      "context"
+      "encoding/json"
+      "log"
+      "net/http"
+      "os"
+      "strings"
+      "sync"
+      "time"
+    )
+
+    type downstreamResult struct {
+      URL string `json:"url"`
+      StatusCode int `json:"statusCode,omitempty"`
+      Body string `json:"body,omitempty"`
+      Error string `json:"error,omitempty"`
+    }
+
+    func main() {
+      serviceName := env("SERVICE_NAME", "watchmen-trace-app")
+      listenAddr := env("LISTEN_ADDR", ":8080")
+      downstreams := splitCSV(os.Getenv("DOWNSTREAM_URLS"))
+      client := &http.Client{Timeout: 2 * time.Second}
+
+      mux := http.NewServeMux()
+      mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        _, _ = w.Write([]byte("ok\n"))
+      })
+      mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        requestID := r.Header.Get("X-Request-Id")
+        if requestID == "" {
+          requestID = time.Now().UTC().Format("20060102T150405.000000000")
+        }
+
+        respondJSON(w, map[string]any{
+          "service": serviceName,
+          "path": r.URL.Path,
+          "requestId": requestID,
+          "downstreams": callDownstreams(r.Context(), client, downstreams, serviceName, requestID),
+          "time": time.Now().UTC().Format(time.RFC3339Nano),
+        })
+      })
+      mux.HandleFunc("/work", func(w http.ResponseWriter, r *http.Request) {
+        requestID := r.Header.Get("X-Request-Id")
+        if requestID == "" {
+          requestID = time.Now().UTC().Format("20060102T150405.000000000")
+        }
+
+        respondJSON(w, map[string]any{
+          "service": serviceName,
+          "path": r.URL.Path,
+          "from": r.URL.Query().Get("from"),
+          "requestId": requestID,
+          "downstreams": callDownstreams(r.Context(), client, downstreams, serviceName, requestID),
+          "time": time.Now().UTC().Format(time.RFC3339Nano),
+        })
+      })
+
+      log.Printf("starting %s on %s with downstreams=%q", serviceName, listenAddr, downstreams)
+      log.Fatal(http.ListenAndServe(listenAddr, logRequests(serviceName, mux)))
+    }
+
+    func callDownstreams(ctx context.Context, client *http.Client, downstreams []string, serviceName, requestID string) []downstreamResult {
+      results := make([]downstreamResult, len(downstreams))
+      var wg sync.WaitGroup
+
+      for i, downstream := range downstreams {
+        wg.Add(1)
+        go func(i int, downstream string) {
+          defer wg.Done()
+          req, err := http.NewRequestWithContext(ctx, http.MethodGet, downstream+"?from="+serviceName, nil)
+          if err != nil {
+            results[i] = downstreamResult{URL: downstream, Error: err.Error()}
+            return
+          }
+          req.Header.Set("X-Request-Id", requestID)
+          resp, err := client.Do(req)
+          if err != nil {
+            results[i] = downstreamResult{URL: downstream, Error: err.Error()}
+            return
+          }
+          defer resp.Body.Close()
+          body := make([]byte, 512)
+          n, _ := resp.Body.Read(body)
+          results[i] = downstreamResult{URL: downstream, StatusCode: resp.StatusCode, Body: string(body[:n])}
+        }(i, downstream)
+      }
+
+      wg.Wait()
+      return results
+    }
+
+    func logRequests(serviceName string, next http.Handler) http.Handler {
+      return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        next.ServeHTTP(w, r)
+        log.Printf("service=%s method=%s path=%s remote=%s duration=%s", serviceName, r.Method, r.URL.RequestURI(), r.RemoteAddr, time.Since(start))
+      })
+    }
+
+    func respondJSON(w http.ResponseWriter, payload any) {
+      w.Header().Set("Content-Type", "application/json")
+      if err := json.NewEncoder(w).Encode(payload); err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+      }
+    }
+
+    func env(key, fallback string) string {
+      value := os.Getenv(key)
+      if value == "" {
+        return fallback
+      }
+      return value
+    }
+
+    func splitCSV(value string) []string {
+      if value == "" {
+        return nil
+      }
+      parts := strings.Split(value, ",")
+      out := make([]string, 0, len(parts))
+      for _, part := range parts {
+        part = strings.TrimSpace(part)
+        if part != "" {
+          out = append(out, part)
+        }
+      }
+      return out
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watchmen-trace-main
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app: watchmen-trace-main
+    app.kubernetes.io/name: watchmen-trace-main
+    app.kubernetes.io/part-of: watchmen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: watchmen-trace-main
+  template:
+    metadata:
+      labels:
+        app: watchmen-trace-main
+        app.kubernetes.io/name: watchmen-trace-main
+        app.kubernetes.io/part-of: watchmen
+    spec:
+      initContainers:
+        - name: build
+          image: ${TRACE_TEST_IMAGE}
+          command: ["go", "build", "-o", "/bin-app/watchmen-trace-app", "/app/main.go"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          volumeMounts:
+            - name: app-source
+              mountPath: /app
+              readOnly: true
+            - name: app-bin
+              mountPath: /bin-app
+      containers:
+        - name: app
+          image: alpine:3.20
+          command: ["/bin-app/watchmen-trace-app"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: watchmen-trace-main
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: DOWNSTREAM_URLS
+              value: http://watchmen-trace-worker-a:80/work,http://watchmen-trace-worker-b:80/work
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-bin
+              mountPath: /bin-app
+              readOnly: true
+      volumes:
+        - name: app-source
+          configMap:
+            name: watchmen-trace-go-app
+            items:
+              - key: main.go
+                path: main.go
+        - name: app-bin
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watchmen-trace-worker-a
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app: watchmen-trace-worker-a
+    app.kubernetes.io/name: watchmen-trace-worker-a
+    app.kubernetes.io/part-of: watchmen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: watchmen-trace-worker-a
+  template:
+    metadata:
+      labels:
+        app: watchmen-trace-worker-a
+        app.kubernetes.io/name: watchmen-trace-worker-a
+        app.kubernetes.io/part-of: watchmen
+    spec:
+      initContainers:
+        - name: build
+          image: ${TRACE_TEST_IMAGE}
+          command: ["go", "build", "-o", "/bin-app/watchmen-trace-app", "/app/main.go"]
+          volumeMounts:
+            - name: app-source
+              mountPath: /app
+              readOnly: true
+            - name: app-bin
+              mountPath: /bin-app
+      containers:
+        - name: app
+          image: alpine:3.20
+          command: ["/bin-app/watchmen-trace-app"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: watchmen-trace-worker-a
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: DOWNSTREAM_URLS
+              value: ""
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-bin
+              mountPath: /bin-app
+              readOnly: true
+      volumes:
+        - name: app-source
+          configMap:
+            name: watchmen-trace-go-app
+            items:
+              - key: main.go
+                path: main.go
+        - name: app-bin
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watchmen-trace-worker-b
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app: watchmen-trace-worker-b
+    app.kubernetes.io/name: watchmen-trace-worker-b
+    app.kubernetes.io/part-of: watchmen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: watchmen-trace-worker-b
+  template:
+    metadata:
+      labels:
+        app: watchmen-trace-worker-b
+        app.kubernetes.io/name: watchmen-trace-worker-b
+        app.kubernetes.io/part-of: watchmen
+    spec:
+      initContainers:
+        - name: build
+          image: ${TRACE_TEST_IMAGE}
+          command: ["go", "build", "-o", "/bin-app/watchmen-trace-app", "/app/main.go"]
+          volumeMounts:
+            - name: app-source
+              mountPath: /app
+              readOnly: true
+            - name: app-bin
+              mountPath: /bin-app
+      containers:
+        - name: app
+          image: alpine:3.20
+          command: ["/bin-app/watchmen-trace-app"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: watchmen-trace-worker-b
+            - name: LISTEN_ADDR
+              value: ":8080"
+            - name: DOWNSTREAM_URLS
+              value: http://watchmen-trace-worker-a:80/work
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-bin
+              mountPath: /bin-app
+              readOnly: true
+      volumes:
+        - name: app-source
+          configMap:
+            name: watchmen-trace-go-app
+            items:
+              - key: main.go
+                path: main.go
+        - name: app-bin
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: watchmen-trace-main
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app: watchmen-trace-main
+    app.kubernetes.io/name: watchmen-trace-main
+    app.kubernetes.io/part-of: watchmen
+  annotations:
+    watchmen.io/role: trace-test
+spec:
+  type: LoadBalancer
+  selector:
+    app: watchmen-trace-main
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: watchmen-trace-worker-a
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app: watchmen-trace-worker-a
+    app.kubernetes.io/name: watchmen-trace-worker-a
+    app.kubernetes.io/part-of: watchmen
+  annotations:
+    watchmen.io/role: trace-test
+spec:
+  type: ClusterIP
+  selector:
+    app: watchmen-trace-worker-a
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: watchmen-trace-worker-b
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app: watchmen-trace-worker-b
+    app.kubernetes.io/name: watchmen-trace-worker-b
+    app.kubernetes.io/part-of: watchmen
+  annotations:
+    watchmen.io/role: trace-test
+spec:
+  type: ClusterIP
+  selector:
+    app: watchmen-trace-worker-b
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: watchmen-ebpf-agent
+  namespace: ${WATCHMEN_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: watchmen
+    app.kubernetes.io/component: ebpf-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: watchmen
+      app.kubernetes.io/component: ebpf-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: watchmen
+        app.kubernetes.io/component: ebpf-agent
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: install
+          image: alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              apk add --no-cache ca-certificates >/dev/null
+              wget -qO /opt/watchmen/watchmen-ebpf-agent --timeout=30 "$WATCHMEN_AGENT_BINARY_URL"
+              chmod 0755 /opt/watchmen/watchmen-ebpf-agent
+          env:
+            - name: WATCHMEN_AGENT_BINARY_URL
+              value: ${WATCHMEN_AGENT_BINARY_URL}
+          volumeMounts:
+            - name: opt
+              mountPath: /opt/watchmen
+      containers:
+        - name: agent
+          image: alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache ca-certificates >/dev/null
+
+              for i in 1 2 3 4 5 6; do
+                wget -qO- --timeout=2 "$WATCHMEN_HEALTH_URL" >/dev/null 2>&1 && break
+                echo "waiting for server..."
+                sleep 10
+              done
+
+              KERNEL="$(uname -r 2>/dev/null || echo '')"
+              PAYLOAD='{"clusterName":"'$CLUSTER_NAME'","projectId":"'$AWS_ACCOUNT_ID'","location":"'$AWS_REGION'","nodeName":"'$WATCHMEN_AGENT_ID'","agentSecret":"'$AGENT_SECRET'","agentVersion":"'$AGENT_VERSION'","kernelVersion":"'"$KERNEL"'"}'
+
+              wget -qO- --timeout=5 --header="Content-Type: application/json" \
+                --post-data="$PAYLOAD" \
+                "$REGISTER_URL" >/dev/null || echo "registration skipped (server unreachable)"
+
+              exec /opt/watchmen/watchmen-ebpf-agent
+          env:
+            - name: CLUSTER_NAME
+              value: ${EKS_CLUSTER_NAME}
+            - name: AWS_ACCOUNT_ID
+              value: ${AWS_ACCOUNT_ID}
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+            - name: AGENT_VERSION
+              value: ${WATCHMEN_AGENT_VERSION}
+            - name: REGISTER_URL
+              value: ${WATCHMEN_API_URL}/agents/k8s/register
+            - name: WATCHMEN_ENDPOINT
+              value: ${WATCHMEN_API_URL}/agents/events
+            - name: WATCHMEN_HEALTH_URL
+              value: ${WATCHMEN_API_URL}/health
+            - name: WATCHMEN_AGENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: AGENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: watchmen-agent-secret
+                  key: agent_secret
+            - name: WATCHMEN_VERBOSE
+              value: ${WATCHMEN_VERBOSE}
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: "0"
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: opt
+              mountPath: /opt/watchmen
+              readOnly: true
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+            - name: tracefs
+              mountPath: /sys/kernel/tracing
+      volumes:
+        - name: opt
+          emptyDir: {}
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
