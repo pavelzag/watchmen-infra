@@ -88,6 +88,22 @@ resource "aws_iam_user_policy_attachment" "managed" {
   policy_arn = each.value
 }
 
+data "aws_iam_policy_document" "lambda_function_url_read" {
+  statement {
+    sid = "ReadLambdaFunctionUrls"
+    actions = [
+      "lambda:ListFunctionUrlConfigs",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_user_policy" "lambda_function_url_read" {
+  name   = "watchmen-lambda-function-url-read"
+  user   = aws_iam_user.watchmen.name
+  policy = data.aws_iam_policy_document.lambda_function_url_read.json
+}
+
 resource "aws_iam_access_key" "watchmen" {
   count = var.create_access_key ? 1 : 0
 

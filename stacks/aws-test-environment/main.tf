@@ -362,6 +362,22 @@ resource "aws_iam_user_policy_attachment" "watchmen_reader_iam_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
 }
 
+data "aws_iam_policy_document" "watchmen_reader_lambda_function_url_read" {
+  statement {
+    sid = "ReadLambdaFunctionUrls"
+    actions = [
+      "lambda:ListFunctionUrlConfigs",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_user_policy" "watchmen_reader_lambda_function_url_read" {
+  name   = "watchmen-lambda-function-url-read"
+  user   = aws_iam_user.users["watchmen_reader"].name
+  policy = data.aws_iam_policy_document.watchmen_reader_lambda_function_url_read.json
+}
+
 resource "aws_iam_user_policy_attachment" "reporting_readonly" {
   user       = aws_iam_user.users["reporting"].name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
