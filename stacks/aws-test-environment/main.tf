@@ -378,6 +378,24 @@ resource "aws_iam_user_policy" "watchmen_reader_lambda_function_url_read" {
   policy = data.aws_iam_policy_document.watchmen_reader_lambda_function_url_read.json
 }
 
+data "aws_iam_policy_document" "watchmen_reader_lambda_logs_read" {
+  statement {
+    sid = "ReadLambdaCloudWatchLogs"
+    actions = [
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams",
+      "logs:FilterLogEvents",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_user_policy" "watchmen_reader_lambda_logs_read" {
+  name   = "watchmen-lambda-cloudwatch-logs-read"
+  user   = aws_iam_user.users["watchmen_reader"].name
+  policy = data.aws_iam_policy_document.watchmen_reader_lambda_logs_read.json
+}
+
 resource "aws_iam_user_policy_attachment" "reporting_readonly" {
   user       = aws_iam_user.users["reporting"].name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
@@ -437,15 +455,37 @@ data "archive_file" "lambda" {
       import json
       import os
       import time
+      from urllib.parse import parse_qs
 
       def handler(event, context):
           body = event.get("body")
-          payload = {
+          headers = event.get("headers") or {}
+          headers_lc = {str(key).lower(): value for key, value in headers.items()}
+          query = parse_qs(event.get("rawQueryString", ""), keep_blank_values=True)
+          request_context = event.get("requestContext", {})
+          http = request_context.get("http", {})
+          access_log = {
+              "type": "lambda_function_url_access",
               "service": os.environ.get("SERVICE_NAME", "watchmen-test"),
-              "method": event.get("requestContext", {}).get("http", {}).get("method"),
+              "method": http.get("method"),
               "path": event.get("rawPath") or event.get("path") or "/",
               "rawQueryString": event.get("rawQueryString", ""),
-              "requestId": event.get("requestContext", {}).get("requestId"),
+              "requestId": request_context.get("requestId") or getattr(context, "aws_request_id", None),
+              "sourceIp": http.get("sourceIp"),
+              "userAgent": http.get("userAgent"),
+              "traceId": headers_lc.get("x-watchmen-trace-id") or (query.get("watchmen_trace_probe") or [None])[0],
+              "traceSource": headers_lc.get("x-watchmen-trace-source"),
+              "traceMethod": headers_lc.get("x-watchmen-trace-method"),
+              "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }
+          print(json.dumps(access_log, separators=(",", ":")))
+          payload = {
+              "service": os.environ.get("SERVICE_NAME", "watchmen-test"),
+              "method": http.get("method"),
+              "path": event.get("rawPath") or event.get("path") or "/",
+              "rawQueryString": event.get("rawQueryString", ""),
+              "requestId": request_context.get("requestId"),
+              "traceId": access_log["traceId"],
               "bodyPreview": body[:8192] if isinstance(body, str) else None,
               "configuredEnvKeys": sorted([
                   key for key in os.environ
@@ -517,9 +557,19 @@ resource "aws_lambda_function" "functions" {
     })
   }
 
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+    log_group             = aws_cloudwatch_log_group.lambda[each.key].name
+  }
+
   tags = var.tags
 
-  depends_on = [aws_iam_role_policy_attachment.lambda_basic]
+  depends_on = [
+    aws_cloudwatch_log_group.lambda,
+    aws_iam_role_policy_attachment.lambda_basic,
+  ]
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
