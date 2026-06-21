@@ -155,6 +155,71 @@ locals {
     attack_multikey     = "wm-attack-multikey-user"
     attack_exposed_cicd = "wm-attack-exposed-cicd"
   }
+  vm_user_data = <<-SH
+    #!/bin/sh
+    set -eu
+
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3
+
+    cat >/opt/watchmen-test-server.py <<'PY'
+    import json
+    import os
+    import socket
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    SERVICE_NAME = os.environ.get("WATCHMEN_TEST_SERVICE", "watchmen-aws-vm")
+
+    class Handler(BaseHTTPRequestHandler):
+        def _respond(self):
+            length = int(self.headers.get("content-length", "0") or "0")
+            body = self.rfile.read(min(length, 8192)).decode("utf-8", "replace") if length else ""
+            payload = {
+                "service": SERVICE_NAME,
+                "host": socket.gethostname(),
+                "method": self.command,
+                "path": self.path,
+                "bodyPreview": body,
+                "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            encoded = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(encoded)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(encoded)
+
+        def do_GET(self): self._respond()
+        def do_POST(self): self._respond()
+        def do_PUT(self): self._respond()
+        def do_PATCH(self): self._respond()
+        def do_DELETE(self): self._respond()
+        def do_HEAD(self): self._respond()
+
+    ThreadingHTTPServer(("0.0.0.0", 80), Handler).serve_forever()
+    PY
+
+    cat >/etc/systemd/system/watchmen-test-server.service <<'UNIT'
+    [Unit]
+    Description=Watchmen AWS VM test HTTP server
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Environment=WATCHMEN_TEST_SERVICE=watchmen-aws-vm
+    ExecStart=/usr/bin/python3 /opt/watchmen-test-server.py
+    Restart=always
+    RestartSec=2
+
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+
+    systemctl daemon-reload
+    systemctl enable --now watchmen-test-server.service
+  SH
 }
 
 resource "aws_s3_bucket" "buckets" {
@@ -358,10 +423,18 @@ data "archive_file" "lambda" {
       import time
 
       def handler(event, context):
+          body = event.get("body")
           payload = {
               "service": os.environ.get("SERVICE_NAME", "watchmen-test"),
+              "method": event.get("requestContext", {}).get("http", {}).get("method"),
               "path": event.get("rawPath") or event.get("path") or "/",
+              "rawQueryString": event.get("rawQueryString", ""),
               "requestId": event.get("requestContext", {}).get("requestId"),
+              "bodyPreview": body[:8192] if isinstance(body, str) else None,
+              "configuredEnvKeys": sorted([
+                  key for key in os.environ
+                  if key.startswith(("LEAKED_", "STRIPE_", "GITHUB_", "DATABASE_"))
+              ]),
               "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
           }
           return {
@@ -557,6 +630,22 @@ resource "aws_security_group" "test" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Open HTTP for external Watchmen VM trace tests"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Open HTTPS for external Watchmen VM inventory tests"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -717,7 +806,8 @@ resource "aws_instance" "test" {
   instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.test.id]
-  associate_public_ip_address = false
+  associate_public_ip_address = true
+  user_data                   = local.vm_user_data
 
   root_block_device {
     volume_size = 10
@@ -735,9 +825,10 @@ resource "aws_instance" "attack_privileged" {
   ami                         = data.aws_ami.debian[0].id
   instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.public[0].id
-  vpc_security_group_ids      = [aws_security_group.attack_open_ssh.id]
+  vpc_security_group_ids      = [aws_security_group.attack_open_ssh.id, aws_security_group.test.id]
   associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.ec2_attack_privileged.name
+  user_data                   = local.vm_user_data
 
   root_block_device {
     volume_size = 10
@@ -757,6 +848,7 @@ resource "aws_instance" "attack_exposed" {
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.attack_allow_all.id]
   associate_public_ip_address = true
+  user_data                   = local.vm_user_data
 
   root_block_device {
     volume_size = 10
@@ -774,8 +866,9 @@ resource "aws_instance" "attack_dev" {
   ami                         = data.aws_ami.debian[0].id
   instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.public[1].id
-  vpc_security_group_ids      = [aws_security_group.attack_open_rdp.id, aws_security_group.attack_open_db_ports.id]
+  vpc_security_group_ids      = [aws_security_group.attack_open_rdp.id, aws_security_group.attack_open_db_ports.id, aws_security_group.test.id]
   associate_public_ip_address = true
+  user_data                   = local.vm_user_data
 
   root_block_device {
     volume_size = 10
@@ -914,6 +1007,24 @@ output "ec2_instances" {
     attack_privileged = var.create_ec2 ? aws_instance.attack_privileged[0].id : null
     attack_exposed    = var.create_ec2 ? aws_instance.attack_exposed[0].id : null
     attack_dev        = var.create_ec2 ? aws_instance.attack_dev[0].id : null
+  }
+}
+
+output "ec2_public_ips" {
+  value = {
+    test              = var.create_ec2 ? aws_instance.test[0].public_ip : null
+    attack_privileged = var.create_ec2 ? aws_instance.attack_privileged[0].public_ip : null
+    attack_exposed    = var.create_ec2 ? aws_instance.attack_exposed[0].public_ip : null
+    attack_dev        = var.create_ec2 ? aws_instance.attack_dev[0].public_ip : null
+  }
+}
+
+output "ec2_test_urls" {
+  value = {
+    test              = var.create_ec2 ? "http://${aws_instance.test[0].public_ip}/" : null
+    attack_privileged = var.create_ec2 ? "http://${aws_instance.attack_privileged[0].public_ip}/" : null
+    attack_exposed    = var.create_ec2 ? "http://${aws_instance.attack_exposed[0].public_ip}/" : null
+    attack_dev        = var.create_ec2 ? "http://${aws_instance.attack_dev[0].public_ip}/" : null
   }
 }
 
