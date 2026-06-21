@@ -1,0 +1,148 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchmen eBPF Agent — DaemonSet
+#
+# Runs one privileged agent pod per Linux node. The agent traces process
+# execution events and forwards them to the Watchmen server.
+#
+# The binary is downloaded from GitHub Releases via an init container.
+# Configure agent authentication via the watchmen-agent-secret Secret.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: watchmen-ebpf-agent
+  namespace: watchmen
+  labels:
+    app.kubernetes.io/name: watchmen
+    app.kubernetes.io/component: ebpf-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: watchmen
+      app.kubernetes.io/component: ebpf-agent
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: watchmen
+        app.kubernetes.io/component: ebpf-agent
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 30
+
+      initContainers:
+        - name: install
+          image: alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              apk add --no-cache ca-certificates >/dev/null
+              wget -qO /opt/watchmen/watchmen-ebpf-agent --timeout=30 "$WATCHMEN_AGENT_BINARY_URL"
+              chmod 0755 /opt/watchmen/watchmen-ebpf-agent
+
+          env:
+            - name: WATCHMEN_AGENT_BINARY_URL
+              value: "https://github.com/pavelzag/watchmen/releases/download/agent-v0.3.18/watchmen-ebpf-agent-linux-amd64"
+            - name: CLUSTER_NAME
+              value: "watchmen-test"
+            - name: PROJECT_ID
+              value: "watchmen-test-488807"
+            - name: LOCATION
+              value: "us-central1"
+            - name: AGENT_VERSION
+              value: "0.3.18"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: AGENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: watchmen-agent-secret
+                  key: agent_secret
+          volumeMounts:
+            - name: opt
+              mountPath: /opt/watchmen
+
+      containers:
+        - name: agent
+          image: alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              for i in 1 2 3 4 5 6; do
+                wget -qO- --timeout=2 "$WATCHMEN_HEALTH_URL" >/dev/null 2>&1 && break
+                echo "waiting for server..."
+                sleep 10
+              done
+
+              KERNEL="$(uname -r 2>/dev/null || echo '')"
+              PAYLOAD='{"clusterName":"'$CLUSTER_NAME'","projectId":"'$PROJECT_ID'","location":"'$LOCATION'","nodeName":"'$WATCHMEN_AGENT_ID'","agentSecret":"'$WATCHMEN_AGENT_SECRET'","agentVersion":"'$AGENT_VERSION'","kernelVersion":"'"$KERNEL"'"}'
+
+              wget -qO- --no-check-certificate --timeout=5 --header="Content-Type: application/json" \
+                --post-data="$PAYLOAD" \
+                "$REGISTER_URL" >/dev/null || echo "registration skipped (server unreachable)"
+
+              exec /opt/watchmen/watchmen-ebpf-agent
+          env:
+            - name: CLUSTER_NAME
+              value: "watchmen-test"
+            - name: PROJECT_ID
+              value: "watchmen-test-488807"
+            - name: LOCATION
+              value: "us-central1"
+            - name: AGENT_VERSION
+              value: "0.3.18"
+            - name: REGISTER_URL
+              value: "https://watchmen-kappa.vercel.app/api/agents/k8s/register"
+            - name: WATCHMEN_HEALTH_URL
+              value: "https://watchmen-kappa.vercel.app/api/health"
+            - name: WATCHMEN_ENDPOINT
+              value: "https://watchmen-kappa.vercel.app/api/agents/events"
+            - name: WATCHMEN_AGENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: WATCHMEN_AGENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: watchmen-agent-secret
+                  key: agent_secret
+            - name: WATCHMEN_VERBOSE
+              value: "1"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: opt
+              mountPath: /opt/watchmen
+              readOnly: true
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+            - name: tracefs
+              mountPath: /sys/kernel/tracing
+          resources:
+            requests:
+              cpu: 0
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+      volumes:
+        - name: opt
+          emptyDir: {}
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing

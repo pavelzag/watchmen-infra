@@ -102,8 +102,8 @@ locals {
       route       = "/attack/leaked-aws-creds"
       description = "Lambda with demo AWS credentials in environment variables"
       env = {
-        AWS_ACCESS_KEY_ID     = "AKIAIOSFODNN7EXAMPLE"
-        AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        LEAKED_AWS_ACCESS_KEY_ID     = "AKIAIOSFODNN7EXAMPLE"
+        LEAKED_AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
       }
     }
     attack_stripe_key = {
@@ -187,6 +187,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "logs" {
 
     expiration {
       days = 30
+    }
+
+    filter {
+      prefix = ""
     }
   }
 }
@@ -932,4 +936,3 @@ output "sqs_queues" {
 output "secret_names" {
   value = sort([for secret in aws_secretsmanager_secret.secrets : secret.name])
 }
-

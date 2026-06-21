@@ -12,6 +12,13 @@ crash.*.log
 # Variables and secrets
 *.tfvars
 *.tfvars.json
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Generated Terraform artifacts
+lambda_payload.zip
 
 # Local CLI configuration
 .terraformrc
@@ -28,4 +35,3 @@ override.tf.json
 
 # Backup snapshots and generated lockfiles inside backups
 backup/**/.terraform.lock.hcl
-

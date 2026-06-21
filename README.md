@@ -1,7 +1,8 @@
 # Watchmen Infra Stacks
 
-This repository contains multiple standalone Terraform stacks. Do not run
-`terraform apply` from the repository root.
+This repository contains Watchmen infrastructure assets: standalone Terraform
+stacks, Kubernetes manifests, systemd units, and local vendor tooling. Do not
+run `terraform apply` from the repository root.
 
 See [DEPLOYMENTS.md](DEPLOYMENTS.md) for detailed AWS and GCP deployment
 inventories, commands, inputs, outputs, and cleanup steps.
@@ -15,7 +16,15 @@ Use one stack directory at a time:
 - `stacks/aws-test-environment`
 - `stacks/security-fixes`
 - `stacks/security-fixes-faulty`
+- `stacks/gcp-gke-cluster`
 - `watchmen-live-streaming-gcp-local-test`
+
+Moved from the application repo:
+
+- `k8s/` - Kubernetes manifests for Watchmen, the processor, test app, Istio config, and the eBPF agent.
+- `deploy/` - host/service deployment assets such as systemd units.
+- `istio-1.21.0/` - local Istio tooling/vendor directory.
+- `.terraform-originals/` - Terraform remediation originals.
 
 Examples:
 
@@ -83,3 +92,95 @@ run, disable compute/database fixtures:
 ```bash
 terraform -chdir=stacks/aws-test-environment apply -var='create_ec2=false' -var='create_rds=false'
 ```
+
+## GKE test cluster with external LoadBalancer
+
+Use the setup helper to create the GKE test cluster and the public
+`watchmen-trace-main` Kubernetes `LoadBalancer`:
+
+```bash
+stacks/gcp-gke-cluster/apply.sh
+```
+
+The script uses these defaults:
+
+- `PROJECT_ID=watchmen-test-488807`
+- `REGION=us-central1`
+- `CLUSTER_NAME=watchmen-test`
+- `WATCHMEN_URL=https://watchmen-kappa.vercel.app`
+- `WATCHMEN_NAMESPACE=watchmen`
+
+It checks `gcloud` auth, starts login if needed, sets the active GCP project,
+runs `terraform init -upgrade`, applies the stack, fetches Kubernetes
+credentials, prints Terraform outputs, and shows the Kubernetes services in the
+`watchmen` namespace.
+
+Preview the Terraform plan without creating resources:
+
+```bash
+stacks/gcp-gke-cluster/apply.sh --plan-only
+```
+
+For a fresh cluster with the Watchmen eBPF agent, pass the agent secret:
+
+```bash
+stacks/gcp-gke-cluster/apply.sh \
+  --with-agent \
+  --agent-secret="$WATCHMEN_AGENT_SECRET"
+```
+
+Override defaults with flags or environment variables:
+
+```bash
+PROJECT_ID=my-gcp-project REGION=us-east1 stacks/gcp-gke-cluster/apply.sh
+
+stacks/gcp-gke-cluster/apply.sh \
+  --project=my-gcp-project \
+  --region=us-east1 \
+  --cluster-name=watchmen-test \
+  --watchmen-url=https://watchmen-kappa.vercel.app
+```
+
+Equivalent raw Terraform commands, if you do not want to use the helper:
+
+```bash
+terraform -chdir=stacks/gcp-gke-cluster init
+terraform -chdir=stacks/gcp-gke-cluster apply \
+  -var="watchmen_url=https://watchmen-kappa.vercel.app" \
+  -var="deploy_trace_test=true"
+```
+
+After apply, Terraform creates three small Go HTTP applications:
+
+- `watchmen-trace-main` - public Kubernetes `LoadBalancer`
+- `watchmen-trace-worker-a` - internal `ClusterIP`
+- `watchmen-trace-worker-b` - internal `ClusterIP`
+
+Each request to `watchmen-trace-main` calls both workers, and worker B also
+calls worker A. Terraform sends test requests by default and prints
+`trace_test_url` plus `trace_ui_check`. Open the Trace UI URL and look for
+traffic between `watchmen-trace-main`, `watchmen-trace-worker-a`, and
+`watchmen-trace-worker-b`.
+
+For a fresh cluster with the eBPF agent, the helper passes the equivalent of:
+
+```bash
+-var="create_watchmen_namespace=true" \
+-var="create_watchmen_agent_secret=true" \
+-var="watchmen_agent_secret=$WATCHMEN_AGENT_SECRET" \
+-var="create_watchmen_ebpf_agent=true"
+```
+
+Destroy the GKE test cluster and release Kubernetes external load balancers:
+
+```bash
+stacks/gcp-gke-cluster/destroy.sh
+stacks/gcp-gke-cluster/destroy.sh --auto-approve
+```
+
+The first command shows the Terraform destroy plan. The second command first
+tries to delete Kubernetes `LoadBalancer` services in the `watchmen` namespace,
+then destroys the Terraform-managed GKE cluster, node pool, network, subnet,
+and Kubernetes test resources. The helper defaults `REFRESH_STATE=false`
+because the current Kubernetes provider/state combination fails during refresh;
+override with `REFRESH_STATE=true` if you want Terraform to refresh state first.

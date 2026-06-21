@@ -49,7 +49,6 @@ locals {
   watchmen_api_url           = "${local.watchmen_base_url}/api"
   watchmen_namespace         = var.watchmen_namespace
   watchmen_agent_secret_name = "watchmen-agent-secret"
-  tailscale_auth_secret_name = "tailscale-auth"
   trace_test_services = {
     main = {
       name           = "watchmen-trace-main"
@@ -108,6 +107,8 @@ resource "google_compute_subnetwork" "gke_test" {
 resource "google_container_cluster" "primary" {
   name     = var.cluster_name
   location = var.region
+
+  deletion_protection = false
 
   network    = google_compute_network.gke_test.id
   subnetwork = google_compute_subnetwork.gke_test.id
@@ -238,35 +239,6 @@ resource "kubernetes_secret_v1" "watchmen_agent" {
   depends_on = [kubernetes_namespace_v1.watchmen]
 }
 
-resource "kubernetes_secret_v1" "tailscale_auth" {
-  count = var.deploy_trace_test && var.create_tailscale_auth_secret ? 1 : 0
-
-  metadata {
-    name      = local.tailscale_auth_secret_name
-    namespace = local.watchmen_namespace
-
-    labels = {
-      "app.kubernetes.io/name"      = "watchmen"
-      "app.kubernetes.io/component" = "ebpf-agent"
-    }
-  }
-
-  data = {
-    authkey = var.tailscale_auth_key
-  }
-
-  type = "Opaque"
-
-  lifecycle {
-    precondition {
-      condition     = var.tailscale_auth_key != ""
-      error_message = "tailscale_auth_key must be set when create_tailscale_auth_secret is true."
-    }
-  }
-
-  depends_on = [kubernetes_namespace_v1.watchmen]
-}
-
 resource "kubernetes_config_map_v1" "trace_test_app" {
   count = var.deploy_trace_test ? 1 : 0
 
@@ -286,21 +258,43 @@ resource "kubernetes_config_map_v1" "trace_test_app" {
       package main
 
       import (
+      	"bytes"
       	"context"
+      	"crypto/sha256"
       	"encoding/json"
+      	"fmt"
+      	"io"
       	"log"
       	"net/http"
+      	"net/url"
       	"os"
       	"strings"
       	"sync"
       	"time"
       )
 
+      const maxBodyPreviewBytes = 8192
+
       type downstreamResult struct {
       	URL        string `json:"url"`
+      	Method     string `json:"method"`
       	StatusCode int    `json:"statusCode,omitempty"`
       	Body       string `json:"body,omitempty"`
       	Error      string `json:"error,omitempty"`
+      }
+
+      type requestSummary struct {
+      	Method        string `json:"method"`
+      	Path          string `json:"path"`
+      	RawQuery      string `json:"rawQuery,omitempty"`
+      	ContentType   string `json:"contentType,omitempty"`
+      	ContentLength int64  `json:"contentLength,omitempty"`
+      	BodyBytes     int    `json:"bodyBytes"`
+      	BodyPreview   string `json:"bodyPreview,omitempty"`
+      	BodySHA256    string `json:"bodySha256,omitempty"`
+      	From          string `json:"from,omitempty"`
+      	Payload       string `json:"payload,omitempty"`
+      	Probe         string `json:"probe,omitempty"`
       }
 
       func main() {
@@ -314,43 +308,88 @@ resource "kubernetes_config_map_v1" "trace_test_app" {
       		w.WriteHeader(http.StatusOK)
       		_, _ = w.Write([]byte("ok\n"))
       	})
-      	mux.HandleFunc("/work", func(w http.ResponseWriter, r *http.Request) {
-      		requestID := r.Header.Get("X-Request-Id")
-      		if requestID == "" {
-      			requestID = time.Now().UTC().Format("20060102T150405.000000000")
-      		}
-
-      		results := callDownstreams(r.Context(), client, downstreams, serviceName, requestID)
-      		respondJSON(w, map[string]any{
-      			"service":     serviceName,
-      			"path":        r.URL.Path,
-      			"from":        r.URL.Query().Get("from"),
-      			"requestId":   requestID,
-      			"downstreams": results,
-      			"time":        time.Now().UTC().Format(time.RFC3339Nano),
-      		})
-      	})
-      	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-      		requestID := r.Header.Get("X-Request-Id")
-      		if requestID == "" {
-      			requestID = time.Now().UTC().Format("20060102T150405.000000000")
-      		}
-
-      		results := callDownstreams(r.Context(), client, downstreams, serviceName, requestID)
-      		respondJSON(w, map[string]any{
-      			"service":     serviceName,
-      			"path":        r.URL.Path,
-      			"requestId":   requestID,
-      			"downstreams": results,
-      			"time":        time.Now().UTC().Format(time.RFC3339Nano),
-      		})
-      	})
+      	traceHandler := handleTraceRequest(client, downstreams, serviceName)
+      	for _, path := range []string{"/", "/work", "/get", "/post", "/put", "/patch", "/delete", "/head", "/options", "/trace"} {
+      		mux.HandleFunc(path, traceHandler)
+      	}
 
       	log.Printf("starting %s on %s with downstreams=%q", serviceName, listenAddr, downstreams)
       	log.Fatal(http.ListenAndServe(listenAddr, logRequests(serviceName, mux)))
       }
 
-      func callDownstreams(ctx context.Context, client *http.Client, downstreams []string, serviceName, requestID string) []downstreamResult {
+      func handleTraceRequest(client *http.Client, downstreams []string, serviceName string) http.HandlerFunc {
+      	return func(w http.ResponseWriter, r *http.Request) {
+      		w.Header().Set("Allow", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE")
+
+      		requestID := r.Header.Get("X-Request-Id")
+      		if requestID == "" {
+      			requestID = r.Header.Get("X-Watchmen-Trace-Id")
+      		}
+      		if requestID == "" {
+      			requestID = time.Now().UTC().Format("20060102T150405.000000000")
+      		}
+
+      		summary, body, err := summarizeRequest(r)
+      		if err != nil {
+      			http.Error(w, err.Error(), http.StatusBadRequest)
+      			return
+      		}
+
+      		results := callDownstreams(r.Context(), client, downstreams, serviceName, requestID, r.Method, body, r.Header.Get("Content-Type"))
+      		payload := map[string]any{
+      			"service":     serviceName,
+      			"requestId":   requestID,
+      			"request":     summary,
+      			"downstreams": results,
+      			"time":        time.Now().UTC().Format(time.RFC3339Nano),
+      		}
+
+      		if r.Method == http.MethodOptions {
+      			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE")
+      			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-Id, X-Watchmen-Trace-Id, X-Watchmen-Trace-Source, X-Watchmen-Trace-Method")
+      		}
+      		if r.Method == http.MethodHead {
+      			w.Header().Set("Content-Type", "application/json")
+      			w.WriteHeader(http.StatusOK)
+      			return
+      		}
+
+      		respondJSON(w, payload)
+      	}
+      }
+
+      func summarizeRequest(r *http.Request) (requestSummary, []byte, error) {
+      	var body []byte
+      	if r.Body != nil {
+      		defer r.Body.Close()
+      		read, err := io.ReadAll(io.LimitReader(r.Body, maxBodyPreviewBytes+1))
+      		if err != nil {
+      			return requestSummary{}, nil, err
+      		}
+      		if len(read) > maxBodyPreviewBytes {
+      			body = read[:maxBodyPreviewBytes]
+      		} else {
+      			body = read
+      		}
+      	}
+
+      	sum := sha256.Sum256(body)
+      	return requestSummary{
+      		Method:        r.Method,
+      		Path:          r.URL.Path,
+      		RawQuery:      r.URL.RawQuery,
+      		ContentType:   r.Header.Get("Content-Type"),
+      		ContentLength: r.ContentLength,
+      		BodyBytes:     len(body),
+      		BodyPreview:   string(body),
+      		BodySHA256:    fmt.Sprintf("%x", sum),
+      		From:          r.URL.Query().Get("from"),
+      		Payload:       r.URL.Query().Get("payload"),
+      		Probe:         r.URL.Query().Get("probe"),
+      	}, body, nil
+      }
+
+      func callDownstreams(ctx context.Context, client *http.Client, downstreams []string, serviceName, requestID, method string, body []byte, contentType string) []downstreamResult {
       	results := make([]downstreamResult, len(downstreams))
       	var wg sync.WaitGroup
 
@@ -359,23 +398,32 @@ resource "kubernetes_config_map_v1" "trace_test_app" {
       		go func(i int, downstream string) {
       			defer wg.Done()
 
-      			req, err := http.NewRequestWithContext(ctx, http.MethodGet, downstream+"?from="+serviceName, nil)
+      			downstreamMethod := method
+      			if downstreamMethod == http.MethodHead || downstreamMethod == http.MethodOptions || downstreamMethod == http.MethodTrace {
+      				downstreamMethod = http.MethodGet
+      			}
+
+      			req, err := http.NewRequestWithContext(ctx, downstreamMethod, appendQuery(downstream, "from", serviceName), bytes.NewReader(body))
       			if err != nil {
-      				results[i] = downstreamResult{URL: downstream, Error: err.Error()}
+      				results[i] = downstreamResult{URL: downstream, Method: downstreamMethod, Error: err.Error()}
       				return
       			}
       			req.Header.Set("X-Request-Id", requestID)
+      			req.Header.Set("X-Watchmen-Trace-Method", method)
+      			if contentType != "" && len(body) > 0 {
+      				req.Header.Set("Content-Type", contentType)
+      			}
 
       			resp, err := client.Do(req)
       			if err != nil {
-      				results[i] = downstreamResult{URL: downstream, Error: err.Error()}
+      				results[i] = downstreamResult{URL: downstream, Method: downstreamMethod, Error: err.Error()}
       				return
       			}
       			defer resp.Body.Close()
 
       			body := make([]byte, 512)
       			n, _ := resp.Body.Read(body)
-      			results[i] = downstreamResult{URL: downstream, StatusCode: resp.StatusCode, Body: string(body[:n])}
+      			results[i] = downstreamResult{URL: downstream, Method: downstreamMethod, StatusCode: resp.StatusCode, Body: string(body[:n])}
       		}(i, downstream)
       	}
 
@@ -404,6 +452,14 @@ resource "kubernetes_config_map_v1" "trace_test_app" {
       		return fallback
       	}
       	return value
+      }
+
+      func appendQuery(rawURL, key, value string) string {
+      	separator := "?"
+      	if strings.Contains(rawURL, "?") {
+      		separator = "&"
+      	}
+      	return rawURL + separator + url.QueryEscape(key) + "=" + url.QueryEscape(value)
       }
 
       func splitCSV(value string) []string {
@@ -707,50 +763,6 @@ resource "kubernetes_daemon_set_v1" "watchmen_ebpf_agent" {
           }
         }
 
-        dynamic "container" {
-          for_each = var.enable_tailscale_sidecar ? [1] : []
-          content {
-            name    = "tailscale"
-            image   = "tailscale/tailscale:latest"
-            command = ["/bin/sh", "-c"]
-            args = [
-              "tailscaled --statedir=/tmp/ts & sleep 2; tailscale up --authkey=$TS_AUTHKEY; echo tailscale ready; sleep infinity",
-            ]
-
-            env {
-              name = "TS_AUTHKEY"
-              value_from {
-                secret_key_ref {
-                  name = local.tailscale_auth_secret_name
-                  key  = "authkey"
-                }
-              }
-            }
-
-            security_context {
-              capabilities {
-                add = ["NET_ADMIN"]
-              }
-            }
-
-            volume_mount {
-              name       = "tun"
-              mount_path = "/dev/net/tun"
-            }
-
-            resources {
-              requests = {
-                cpu    = "0"
-                memory = "16Mi"
-              }
-              limits = {
-                cpu    = "50m"
-                memory = "32Mi"
-              }
-            }
-          }
-        }
-
         container {
           name  = "agent"
           image = "alpine:3.20"
@@ -857,15 +869,6 @@ resource "kubernetes_daemon_set_v1" "watchmen_ebpf_agent" {
           }
         }
 
-        dynamic "volume" {
-          for_each = var.enable_tailscale_sidecar ? [1] : []
-          content {
-            name = "tun"
-            host_path {
-              path = "/dev/net/tun"
-            }
-          }
-        }
         volume {
           name = "opt"
           empty_dir {}
@@ -888,7 +891,6 @@ resource "kubernetes_daemon_set_v1" "watchmen_ebpf_agent" {
 
   depends_on = [
     kubernetes_secret_v1.watchmen_agent,
-    kubernetes_secret_v1.tailscale_auth,
     kubernetes_service_v1.trace_test,
   ]
 }
