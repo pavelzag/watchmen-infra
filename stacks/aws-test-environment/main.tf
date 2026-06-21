@@ -149,7 +149,7 @@ locals {
     reporting           = "${var.name_prefix}-reporting"
     cicd                = "${var.name_prefix}-cicd"
     github_ci           = "github-ci"
-    watchmen_reader     = "watchmen-reader"
+    watchmen_reader     = "watchmen-scanner"
     attack_escalation   = "wm-attack-escalation-user"
     attack_owner        = "wm-attack-owner-user"
     attack_multikey     = "wm-attack-multikey-user"
@@ -620,6 +620,40 @@ resource "aws_lambda_permission" "api_gateway" {
   source_arn    = "${aws_apigatewayv2_api.test.execution_arn}/*/*"
 }
 
+resource "aws_lambda_function_url" "functions" {
+  for_each = aws_lambda_function.functions
+
+  function_name      = each.value.function_name
+  authorization_type = "NONE"
+
+  cors {
+    allow_credentials = false
+    allow_headers     = ["content-type", "x-request-id"]
+    allow_methods     = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
+    allow_origins     = ["*"]
+    max_age           = 300
+  }
+}
+
+resource "aws_lambda_permission" "function_url" {
+  for_each = aws_lambda_function.functions
+
+  statement_id           = "AllowPublicFunctionUrl-${each.key}"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = each.value.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
+resource "aws_lambda_permission" "function_url_invoke" {
+  for_each = aws_lambda_function.functions
+
+  statement_id  = "AllowPublicFunctionUrlInvoke-${each.key}"
+  action        = "lambda:InvokeFunction"
+  function_name = each.value.function_name
+  principal     = "*"
+}
+
 resource "aws_vpc" "test" {
   cidr_block           = "10.96.0.0/16"
   enable_dns_hostnames = true
@@ -1039,16 +1073,28 @@ output "iam_users" {
   }
 }
 
+output "watchmen_scanner_access_key_id" {
+  value       = var.create_access_keys ? aws_iam_access_key.primary["watchmen_reader"].id : null
+  sensitive   = true
+  description = "Access key ID for the Watchmen scanner UI user."
+}
+
+output "watchmen_scanner_secret_access_key" {
+  value       = var.create_access_keys ? aws_iam_access_key.primary["watchmen_reader"].secret : null
+  sensitive   = true
+  description = "Secret access key for the Watchmen scanner UI user."
+}
+
 output "watchmen_reader_access_key_id" {
   value       = var.create_access_keys ? aws_iam_access_key.primary["watchmen_reader"].id : null
   sensitive   = true
-  description = "Access key ID for the Watchmen reader user."
+  description = "Deprecated alias for watchmen_scanner_access_key_id."
 }
 
 output "watchmen_reader_secret_access_key" {
   value       = var.create_access_keys ? aws_iam_access_key.primary["watchmen_reader"].secret : null
   sensitive   = true
-  description = "Secret access key for the Watchmen reader user."
+  description = "Deprecated alias for watchmen_scanner_secret_access_key."
 }
 
 output "buckets" {
@@ -1065,6 +1111,12 @@ output "lambda_functions" {
 
 output "http_api_base_url" {
   value = aws_apigatewayv2_api.test.api_endpoint
+}
+
+output "lambda_function_urls" {
+  value = {
+    for key, url in aws_lambda_function_url.functions : key => url.function_url
+  }
 }
 
 output "ec2_instances" {

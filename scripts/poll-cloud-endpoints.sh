@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/poll-gke-endpoints.sh --email EMAIL --intervals 1,2,5,10,15,20 [options]
+  scripts/poll-cloud-endpoints.sh --email EMAIL --intervals 1,2,5,10,15,20 [options]
 
 Polls Watchmen trace endpoints for GCP, AWS, or both. GCP defaults are read
 from stacks/gcp-gke-cluster Terraform outputs when available.
@@ -21,6 +21,10 @@ Options:
   --project ID               GCP project ID. Default: parsed from deploy_agent output.
   --agent-binary-url URL     Agent binary URL to check.
   --aws-lambda-url URL       AWS Lambda Function URL to poll.
+  --aws-lambda-name NAME     Lambda Function URL output key to auto-fetch. Use "all"
+                            to poll every Terraform Lambda URL. Default: hello
+  --aws-all-lambdas          Poll every Terraform Lambda Function URL.
+  --aws-tf-dir DIR           AWS test Terraform dir. Default: stacks/aws-test-environment
   --aws-ec2-url URL          AWS EC2 public HTTP endpoint to poll.
   --aws-elb-url URL          AWS ELB/ALB public HTTP endpoint to poll.
   --aws-eks-url URL          Public EKS API endpoint to poll.
@@ -31,13 +35,16 @@ Options:
   -h, --help                 Show this help.
 
 Example:
-  scripts/poll-gke-endpoints.sh --email zagalsky@gmail.com --intervals 1,2,5,10,15,20
-  scripts/poll-gke-endpoints.sh --email zagalsky@gmail.com --intervals 1,5 --clouds gcp,aws --aws-lambda-url https://abc.lambda-url.us-east-1.on.aws/
+  scripts/poll-cloud-endpoints.sh --email zagalsky@gmail.com --intervals 1,2,5,10,15,20
+  scripts/poll-cloud-endpoints.sh --email zagalsky@gmail.com --intervals 1,5 --clouds gcp,aws --aws-lambda-url https://abc.lambda-url.us-east-1.on.aws/
+  scripts/poll-cloud-endpoints.sh --email zagalsky@gmail.com --intervals 1,5 --cloud aws --aws-lambda-name attack_public_api
+  scripts/poll-cloud-endpoints.sh --email zagalsky@gmail.com --intervals 1,5 --cloud aws --aws-all-lambdas
 EOF
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tf_dir="$repo_root/stacks/gcp-gke-cluster"
+aws_tf_dir="${AWS_TF_DIR:-$repo_root/stacks/aws-test-environment}"
 
 email=""
 intervals=""
@@ -49,6 +56,8 @@ cluster="${GKE_CLUSTER_NAME:-}"
 project="${GCP_PROJECT_ID:-}"
 agent_binary_url="${WATCHMEN_AGENT_BINARY_URL:-https://github.com/pavelzag/watchmen/releases/download/agent-v0.3.19/watchmen-ebpf-agent-linux-amd64}"
 aws_lambda_url="${AWS_LAMBDA_URL:-}"
+aws_lambda_name="${AWS_LAMBDA_NAME:-hello}"
+aws_all_lambdas="${AWS_ALL_LAMBDAS:-false}"
 aws_ec2_url="${AWS_EC2_URL:-}"
 aws_elb_url="${AWS_ELB_URL:-}"
 aws_eks_url="${AWS_EKS_URL:-}"
@@ -101,6 +110,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --aws-lambda-url)
       aws_lambda_url="${2:-}"
+      shift 2
+      ;;
+    --aws-lambda-name)
+      aws_lambda_name="${2:-}"
+      shift 2
+      ;;
+    --aws-all-lambdas)
+      aws_all_lambdas="true"
+      shift
+      ;;
+    --aws-tf-dir)
+      aws_tf_dir="${2:-}"
       shift 2
       ;;
     --aws-ec2-url)
@@ -209,6 +230,64 @@ api_url="$watchmen_url/api"
 cluster="${cluster:-watchmen-test}"
 project="${project:-watchmen-test-488807}"
 aws_account="${aws_account:-<unknown>}"
+
+declare -a aws_lambda_names=()
+declare -a aws_lambda_urls=()
+
+if [[ -n "$aws_lambda_url" ]]; then
+  aws_lambda_names+=("${aws_lambda_name:-custom}")
+  aws_lambda_urls+=("$aws_lambda_url")
+fi
+
+if [[ "$aws_lambda_name" == "all" ]]; then
+  aws_all_lambdas="true"
+fi
+
+if cloud_enabled "aws" && [[ "${#aws_lambda_urls[@]}" -eq 0 && -d "$aws_tf_dir" ]]; then
+  lambda_urls_json="$(terraform -chdir="$aws_tf_dir" output -json lambda_function_urls 2>/dev/null || true)"
+  if command -v jq >/dev/null 2>&1; then
+    if [[ -n "$lambda_urls_json" ]]; then
+      if [[ "$aws_all_lambdas" == "true" ]]; then
+        while IFS=$'\t' read -r lambda_name lambda_url; do
+          [[ -n "$lambda_name" && -n "$lambda_url" ]] || continue
+          aws_lambda_names+=("$lambda_name")
+          aws_lambda_urls+=("$lambda_url")
+        done < <(printf '%s' "$lambda_urls_json" | jq -r 'to_entries[] | [.key, .value] | @tsv')
+      else
+        aws_lambda_url="$(printf '%s' "$lambda_urls_json" | jq -r --arg name "$aws_lambda_name" '.[$name] // empty')"
+        if [[ -n "$aws_lambda_url" ]]; then
+          aws_lambda_names+=("$aws_lambda_name")
+          aws_lambda_urls+=("$aws_lambda_url")
+        fi
+      fi
+    fi
+  elif [[ -n "$lambda_urls_json" ]]; then
+    if [[ "$aws_all_lambdas" == "true" ]]; then
+      while IFS=$'\t' read -r lambda_name lambda_url; do
+        [[ -n "$lambda_name" && -n "$lambda_url" ]] || continue
+        aws_lambda_names+=("$lambda_name")
+        aws_lambda_urls+=("$lambda_url")
+      done < <(
+        printf '%s' "$lambda_urls_json" \
+          | tr ',' '\n' \
+          | sed -n 's/[{}[:space:]]*"\([^"]*\)":[[:space:]]*"\([^"]*\)".*/\1	\2/p'
+      )
+    else
+      aws_lambda_url="$(
+        printf '%s' "$lambda_urls_json" \
+          | sed -n 's/.*"'"$aws_lambda_name"'":[[:space:]]*"\([^"]*\)".*/\1/p'
+      )"
+      if [[ -n "$aws_lambda_url" ]]; then
+        aws_lambda_names+=("$aws_lambda_name")
+        aws_lambda_urls+=("$aws_lambda_url")
+      fi
+    fi
+  fi
+  if [[ "${#aws_lambda_urls[@]}" -eq 0 ]]; then
+    echo "AWS Lambda URL output '$aws_lambda_name' not found in $aws_tf_dir." >&2
+    echo "Run: AWS_PROFILE=watchmen-terraform-admin stacks/aws-test-environment/apply.sh --no-ec2" >&2
+  fi
+fi
 
 urlencode() {
   local value="$1"
@@ -431,7 +510,7 @@ fi
 if cloud_enabled "gcp" && [[ -n "$trace_url" ]]; then
   json_payload='{"traceId":"__TRACE_ID__","email":"__EMAIL__","cluster":"__CLUSTER__","project":"__PROJECT__","kind":"json","nested":{"flag":true,"count":3},"items":["alpha","beta","gamma"]}'
   form_payload='trace_id=__TRACE_ID__&email=__EMAIL__&kind=form&feature=ebpf-agent&encoded=a%2Bb%3Dc'
-  text_payload=$'trace=__TRACE_ID__\nemail=__EMAIL__\nkind=text\nmessage=hello from poll-gke-endpoints'
+  text_payload=$'trace=__TRACE_ID__\nemail=__EMAIL__\nkind=text\nmessage=hello from poll-cloud-endpoints'
   patch_payload='{"traceId":"__TRACE_ID__","op":"replace","path":"/feature/ebpf","value":"payload-capture"}'
   binary_payload=$'watchmen-binary-probe __TRACE_ID__\n\x01\x02\x03\x7f payload-end'
 
@@ -443,13 +522,15 @@ if cloud_enabled "aws"; then
 
   aws_json_payload='{"traceId":"__TRACE_ID__","email":"__EMAIL__","cloud":"__CLOUD__","account":"__AWS_ACCOUNT__","region":"__AWS_REGION__","cluster":"__AWS_CLUSTER__","kind":"json","nested":{"flag":true,"count":3},"items":["lambda","ec2","eks"]}'
   aws_form_payload='trace_id=__TRACE_ID__&email=__EMAIL__&cloud=__CLOUD__&account=__AWS_ACCOUNT__&region=__AWS_REGION__&kind=form'
-  aws_text_payload=$'trace=__TRACE_ID__\nemail=__EMAIL__\ncloud=__CLOUD__\naccount=__AWS_ACCOUNT__\nregion=__AWS_REGION__\nmessage=hello from poll-aws-endpoints'
+  aws_text_payload=$'trace=__TRACE_ID__\nemail=__EMAIL__\ncloud=__CLOUD__\naccount=__AWS_ACCOUNT__\nregion=__AWS_REGION__\nmessage=hello from poll-cloud-endpoints'
   aws_patch_payload='{"traceId":"__TRACE_ID__","op":"replace","path":"/feature/aws","value":"payload-capture"}'
   aws_binary_payload=$'watchmen-aws-binary-probe __TRACE_ID__\n\x01\x02\x03\x7f payload-end'
 
-  if [[ -n "$aws_lambda_url" ]]; then
-    add_http_matrix "aws" "aws-lambda" "$aws_lambda_url" "aws-lambda" "$aws_json_payload" "$aws_form_payload" "$aws_text_payload" "$aws_patch_payload" "$aws_binary_payload"
-  fi
+  for i in "${!aws_lambda_urls[@]}"; do
+    lambda_name="${aws_lambda_names[$i]}"
+    lambda_url="${aws_lambda_urls[$i]}"
+    add_http_matrix "aws" "aws-lambda-${lambda_name}" "$lambda_url" "aws-lambda-${lambda_name}" "$aws_json_payload" "$aws_form_payload" "$aws_text_payload" "$aws_patch_payload" "$aws_binary_payload"
+  done
   if [[ -n "$aws_ec2_url" ]]; then
     add_http_matrix "aws" "aws-ec2" "$aws_ec2_url" "aws-ec2" "$aws_json_payload" "$aws_form_payload" "$aws_text_payload" "$aws_patch_payload" "$aws_binary_payload"
   fi
@@ -475,7 +556,14 @@ echo "  trace_url:    ${trace_url:-<not found>}"
 echo "  aws_region:   $aws_region"
 echo "  aws_account:  $aws_account"
 echo "  aws_cluster:  $aws_cluster"
-echo "  aws_lambda:   ${aws_lambda_url:-<not set>}"
+if [[ "${#aws_lambda_urls[@]}" -eq 0 ]]; then
+  echo "  aws_lambda:   <not set>"
+else
+  echo "  aws_lambda:   ${#aws_lambda_urls[@]} endpoint(s)"
+  for i in "${!aws_lambda_urls[@]}"; do
+    echo "    - ${aws_lambda_names[$i]}: ${aws_lambda_urls[$i]}"
+  done
+fi
 echo "  aws_ec2:      ${aws_ec2_url:-<not set>}"
 echo "  aws_elb:      ${aws_elb_url:-<not set>}"
 echo "  aws_eks:      ${aws_eks_url:-<not set>}"

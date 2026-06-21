@@ -245,7 +245,7 @@ gcloud container clusters get-credentials watchmen-test --region us-central1
 Poll endpoints:
 
 ```bash
-scripts/poll-gke-endpoints.sh \
+scripts/poll-cloud-endpoints.sh \
   --email you@example.com \
   --intervals 1,2,5,10,15,20
 ```

@@ -62,6 +62,26 @@ for arg in "$@"; do
   esac
 done
 
+echo "Checking AWS identity..."
+CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
+CALLER_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+echo "AWS caller account: $CALLER_ACCOUNT"
+echo "AWS caller ARN: $CALLER_ARN"
+
+case "$CALLER_ARN" in
+  *":user/watchmen-scanner"|*":user/service/watchmen/watchmen-scanner"|*":user/service/watchmen-test/watchmen-scanner")
+    cat >&2 <<EOF
+Refusing to destroy with watchmen-scanner.
+
+watchmen-scanner is the Watchmen UI scanner user and should only read cloud
+inventory/logs. Use the infrastructure admin identity instead, for example:
+
+  AWS_PROFILE=watchmen-terraform-admin $0
+EOF
+    exit 1
+    ;;
+esac
+
 terraform_args=(
   -var="aws_region=$AWS_REGION"
   -var="name_prefix=$NAME_PREFIX"

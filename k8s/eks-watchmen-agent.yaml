@@ -15,7 +15,7 @@ metadata:
     app.kubernetes.io/component: ebpf-agent
 type: Opaque
 stringData:
-  agent_secret: ${WATCHMEN_AGENT_SECRET}
+  agent_secret: "${WATCHMEN_AGENT_SECRET}"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -490,7 +490,7 @@ spec:
               chmod 0755 /opt/watchmen/watchmen-ebpf-agent
           env:
             - name: WATCHMEN_AGENT_BINARY_URL
-              value: ${WATCHMEN_AGENT_BINARY_URL}
+              value: "${WATCHMEN_AGENT_BINARY_URL}"
           volumeMounts:
             - name: opt
               mountPath: /opt/watchmen
@@ -519,19 +519,19 @@ spec:
               exec /opt/watchmen/watchmen-ebpf-agent
           env:
             - name: CLUSTER_NAME
-              value: ${EKS_CLUSTER_NAME}
+              value: "${EKS_CLUSTER_NAME}"
             - name: AWS_ACCOUNT_ID
-              value: ${AWS_ACCOUNT_ID}
+              value: "${AWS_ACCOUNT_ID}"
             - name: AWS_REGION
-              value: ${AWS_REGION}
+              value: "${AWS_REGION}"
             - name: AGENT_VERSION
-              value: ${WATCHMEN_AGENT_VERSION}
+              value: "${WATCHMEN_AGENT_VERSION}"
             - name: REGISTER_URL
-              value: ${WATCHMEN_API_URL}/agents/k8s/register
+              value: "${WATCHMEN_API_URL}/agents/k8s/register"
             - name: WATCHMEN_ENDPOINT
-              value: ${WATCHMEN_API_URL}/agents/events
+              value: "${WATCHMEN_API_URL}/agents/events"
             - name: WATCHMEN_HEALTH_URL
-              value: ${WATCHMEN_API_URL}/health
+              value: "${WATCHMEN_API_URL}/health"
             - name: WATCHMEN_AGENT_ID
               valueFrom:
                 fieldRef:
@@ -542,7 +542,7 @@ spec:
                   name: watchmen-agent-secret
                   key: agent_secret
             - name: WATCHMEN_VERBOSE
-              value: ${WATCHMEN_VERBOSE}
+              value: "${WATCHMEN_VERBOSE}"
           securityContext:
             privileged: true
           resources:
