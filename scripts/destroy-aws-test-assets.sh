@@ -111,14 +111,26 @@ cleanup_eks_load_balancers() {
   fi
 
   echo "Fetching kubeconfig for EKS LoadBalancer cleanup..."
-  aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" >/dev/null
+  if ! aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" >/dev/null; then
+    echo "Could not fetch kubeconfig; skipping Kubernetes LoadBalancer pre-cleanup."
+    return
+  fi
+
+  if ! kubectl get namespace "$WATCHMEN_NAMESPACE" >/dev/null 2>&1; then
+    echo "Namespace '$WATCHMEN_NAMESPACE' not found; skipping Kubernetes LoadBalancer pre-cleanup."
+    return
+  fi
 
   echo "Deleting Kubernetes LoadBalancer services in namespace '$WATCHMEN_NAMESPACE'..."
-  mapfile -t lb_services < <(
-    kubectl -n "$WATCHMEN_NAMESPACE" get svc \
-      -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.name}{"\n"}{end}' \
-      2>/dev/null || true
-  )
+  lb_services=()
+  while IFS= read -r svc; do
+    [ -n "$svc" ] || continue
+    lb_services+=("$svc")
+  done <<EOF
+$(kubectl -n "$WATCHMEN_NAMESPACE" get svc \
+  -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.name}{"\n"}{end}' \
+  2>/dev/null || true)
+EOF
 
   if [ "${#lb_services[@]}" -eq 0 ]; then
     echo "No Kubernetes LoadBalancer services found in namespace '$WATCHMEN_NAMESPACE'."
@@ -127,7 +139,7 @@ cleanup_eks_load_balancers() {
 
   for svc in "${lb_services[@]}"; do
     [ -n "$svc" ] || continue
-    kubectl -n "$WATCHMEN_NAMESPACE" delete svc "$svc" --ignore-not-found
+    kubectl -n "$WATCHMEN_NAMESPACE" delete svc "$svc" --ignore-not-found || true
   done
 }
 
