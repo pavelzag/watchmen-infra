@@ -11,6 +11,7 @@ Use one stack directory at a time:
 
 - `stacks/live-streaming-gcp`
 - `stacks/live-streaming-aws`
+- `stacks/watchmen-cloud-access`
 - `stacks/aws-watchmen-user`
 - `stacks/aws-eks-cluster`
 - `stacks/aws-test-environment`
@@ -33,6 +34,46 @@ terraform -chdir=stacks/live-streaming-gcp init
 terraform -chdir=stacks/live-streaming-gcp plan -var="gcp_project_id=watchmen-test-488807"
 terraform -chdir=stacks/live-streaming-gcp apply -var="gcp_project_id=watchmen-test-488807"
 ```
+
+## Watchmen Cloud Access
+
+Create the recommended cloud credential setup for the new post-login connection
+flow: a GCP scanner service account/key plus an AWS AssumeRole role with
+External ID.
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access init
+AWS_PROFILE=your-admin-profile terraform -chdir=stacks/watchmen-cloud-access apply \
+  -var='gcp_project_id=watchmen-test-488807' \
+  -var='aws_external_id=replace-with-unique-external-id'
+```
+
+Run AWS provisioning with an IAM admin/provisioning profile, not the
+`watchmen-scanner` read-only key used by the app.
+
+Then paste these outputs into Watchmen Settings:
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access output -raw gcp_service_account_key_json
+terraform -chdir=stacks/watchmen-cloud-access output -raw aws_manual_access_key_id
+terraform -chdir=stacks/watchmen-cloud-access output -raw aws_manual_secret_access_key
+terraform -chdir=stacks/watchmen-cloud-access output -raw aws_role_arn
+terraform -chdir=stacks/watchmen-cloud-access output -raw aws_external_id
+```
+
+For the default AWS Access Keys form, apply with
+`create_aws_manual_access_key_user=true` and use the `aws_manual_*` outputs.
+This now reuses an existing `watchmen-scanner` IAM user by default; add
+`create_aws_manual_user=true` only when Terraform should create that user.
+Do not paste `aws_assumer_*` outputs into the Access Keys form; those are only
+server runtime credentials for Role ARN auth.
+
+For hosted Watchmen, set `watchmen_server_principal_arns` to the IAM principal
+ARN used by the Watchmen server runtime. For local same-account testing, the
+stack defaults the AWS trust policy to the current account root and still
+requires the External ID. If Watchmen does not already have AWS runtime
+credentials, set `create_aws_assumer_access_key_user=true` and use the assumer
+key outputs as server environment variables.
 
 ## AWS Watchmen Access User
 

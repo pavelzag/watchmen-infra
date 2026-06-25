@@ -20,10 +20,90 @@ Use one stack directory at a time.
 | GCP live trace streaming | `stacks/live-streaming-gcp/` | Cloud Logging to Pub/Sub for Watchmen trace ingestion |
 | GCP local trace streaming | `watchmen-live-streaming-gcp-local-test/` | Pub/Sub push to a local Watchmen instance through a public tunnel |
 | GCP GKE agent test | `stacks/gcp-gke-cluster/` | Minimal GKE cluster, Watchmen agent resources, and trace-test services |
+| Watchmen cloud access | `stacks/watchmen-cloud-access/` | GCP scanner service account/key and AWS AssumeRole role for the post-login cloud connection flow |
 | AWS Watchmen access user | `stacks/aws-watchmen-user/` | Minimal IAM user for connecting AWS to Watchmen |
 | AWS full test environment | `stacks/aws-test-environment/` | Broad AWS equivalent of the GCP test fixtures |
 | AWS live trace streaming | `stacks/live-streaming-aws/` | CloudWatch Logs subscription filters to Kinesis |
 | AWS EKS agent test | `stacks/aws-eks-cluster/` + `scripts/deploy-watchmen-agent-eks.sh` | Minimal EKS cluster and Watchmen agent deployment |
+
+## Watchmen Cloud Access
+
+Path: `stacks/watchmen-cloud-access/`
+
+### What It Creates
+
+- GCP service account `watchmen-scanner` with project read/security-review roles.
+- GCP service account JSON key for Watchmen Settings.
+- AWS IAM role `watchmen-scanner-role` with `ReadOnlyAccess`, `SecurityAudit`, and `IAMReadOnlyAccess`.
+- AWS trust policy requiring `sts:ExternalId`.
+- Optional minimal AWS IAM user/access key that can only assume the scanner role.
+- Optional AWS IAM user/access key for Watchmen's manual credential mode.
+
+### Commands
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access init
+AWS_PROFILE=your-admin-profile terraform -chdir=stacks/watchmen-cloud-access apply \
+  -var='gcp_project_id=watchmen-test-488807' \
+  -var='aws_external_id=replace-with-unique-external-id' \
+  -var='create_aws_manual_access_key_user=true'
+```
+
+Use an AWS IAM admin/provisioning identity for this apply. The
+`watchmen-scanner` key is the read-only key consumed by the app and cannot
+create IAM users, roles, policies, or access keys. By default, the stack reuses
+an existing `watchmen-scanner` user; add `-var='create_aws_manual_user=true'`
+only when Terraform should create that user.
+
+For hosted Watchmen, pass the server runtime IAM principal:
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access apply \
+  -var='gcp_project_id=watchmen-test-488807' \
+  -var='aws_external_id=replace-with-unique-external-id' \
+  -var='watchmen_server_principal_arns=["arn:aws:iam::123456789012:role/watchmen-runtime"]'
+```
+
+Create optional server runtime keys for Role ARN auth:
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access apply \
+  -var='gcp_project_id=watchmen-test-488807' \
+  -var='create_aws_role=true' \
+  -var='create_aws_assumer_access_key_user=true'
+```
+
+Create direct scanner keys for the default AWS Access Keys form:
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access apply \
+  -var='gcp_project_id=watchmen-test-488807' \
+  -var='create_aws_manual_access_key_user=true'
+```
+
+If the `watchmen-scanner` user does not exist:
+
+```bash
+terraform -chdir=stacks/watchmen-cloud-access apply \
+  -var='gcp_project_id=watchmen-test-488807' \
+  -var='create_aws_manual_access_key_user=true' \
+  -var='create_aws_manual_user=true'
+```
+
+### Useful Outputs
+
+- `gcp_service_account_key_json`
+- `gcp_service_account_key_base64`
+- `aws_role_arn`
+- `aws_external_id`
+- `aws_assumer_access_key_id`
+- `aws_assumer_secret_access_key`
+- `aws_manual_access_key_id`
+- `aws_manual_secret_access_key`
+
+Use `aws_manual_*` outputs in the Watchmen AWS Access Keys form. Use
+`aws_assumer_*` only as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` on the
+Watchmen server when the saved Watchmen connection uses Role ARN.
 
 ## GCP Full Test Environment
 
@@ -574,4 +654,3 @@ account.
 - RDS, EKS, GKE, Cloud SQL, EC2, NAT/load balancers, and public IP resources can
   incur ongoing costs.
 - Always destroy test environments when finished.
-

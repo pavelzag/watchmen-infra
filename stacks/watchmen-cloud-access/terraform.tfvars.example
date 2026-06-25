@@ -1,0 +1,19 @@
+gcp_project_id = "your-gcp-project-id"
+
+# For local same-account AWS testing, this can be omitted. For hosted Watchmen,
+# set it to the IAM principal ARN used by the Watchmen server.
+# watchmen_server_principal_arns = [
+#   "arn:aws:iam::123456789012:role/watchmen-runtime",
+# ]
+
+# Use a unique value for every Watchmen deployment/customer.
+aws_external_id = "replace-with-unique-external-id"
+
+# Useful for Vercel/local Docker testing when Watchmen does not already run with
+# an AWS IAM identity. These keys are only allowed to assume the scanner role.
+# create_aws_role = true
+# create_aws_assumer_access_key_user = true
+
+# Prefer AWS Role ARN auth. Enable only when testing the advanced manual key flow.
+# create_aws_manual_access_key_user = true
+# create_aws_manual_user = false
